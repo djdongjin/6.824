@@ -67,14 +67,16 @@ func mapper(mapf func(string, string) []KeyValue, reply *MRReply) bool {
 		for _, ikv := range hash2ikv[i] {
 			err := enc.Encode(&kva[ikv])
 			if err != nil {
-				log.Fatal("encoing error")
+				log.Fatal("encoding error")
 			}
 		}
+		hash2outpFiles[i].Close()
 	}
 	// rename
 	for i, f := range hash2outpFiles {
 		os.Rename(f.Name(), fmt.Sprintf(reply.OutpFile + "%d", i))
 	}
+	log.Printf("Worker finish Map %d\n", reply.JobID)
 	return true;
 }
 
@@ -90,6 +92,7 @@ func reducer(reducef func(string, []string) string, reply *MRReply) bool {
 			}
 			intermediate = append(intermediate, kv)
 		}
+		ifile.Close()
 	}
 	ofile, _ := ioutil.TempFile(".", "*")
 	sort.Sort(ByKey(intermediate))
@@ -110,7 +113,9 @@ func reducer(reducef func(string, []string) string, reply *MRReply) bool {
 
 		i = j
 	}
+	ofile.Close()
 	os.Rename(ofile.Name(), reply.OutpFile)
+	log.Printf("Worker finish Reduce %d\n", reply.JobID)
 	return true
 }
 
@@ -121,11 +126,12 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// Your worker implementation here.
-	args := MRArgs{}
-	reply := MRReply{}
+	log.SetOutput(ioutil.Discard)
     for {
+		args := MRArgs{}
+		reply := MRReply{}
 		call("Master.AskJob", &args, &reply)
-		log.Printf("Got job %s\n", reply.JobName)
+		log.Printf("Worker got job %s, %d\n", reply.JobName, reply.JobID)
 		if reply.JobName == "end" {
 			break
 		}
@@ -135,7 +141,7 @@ func Worker(mapf func(string, string) []KeyValue,
 		case "reduce":
 			reducer(reducef, &reply)
 		case "wait":
-			time.Sleep(5 * 1000 * time.Millisecond)
+			time.Sleep(5 * time.Second)
 		}
 	}
 

@@ -23,15 +23,18 @@ type ExampleReply struct {
 }
 
 // Add your RPC definitions here.
+
+// MRArgs : we didn't use args from worker to master
 type MRArgs struct {
 
 }
 
+// MRReply : return struct from master to worker
 type MRReply struct {
 	JobName string		// map, reduce, wait, end
 	JobID int
-	InpFiles []string
-	OutpFile string
+	InpFiles []string	// for map, it has only one file
+	OutpFile string		// for map, mr-x-; for reduce, mr-out-y
 	NReduce int
 }
 
