@@ -23,7 +23,17 @@ type ExampleReply struct {
 }
 
 // Add your RPC definitions here.
+type MRArgs struct {
 
+}
+
+type MRReply struct {
+	JobName string		// map, reduce, wait, end
+	JobID int
+	InpFiles []string
+	OutpFile string
+	NReduce int
+}
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the master.
