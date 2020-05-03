@@ -58,6 +58,7 @@ type Raft struct {
 	// persistent
 	currentRole RaftRole		  // Leader, Candidate, Follower
 	currentTerm int				  // latest term the serer has seen, init to 0
+	voted		bool			  // if voted, then votedFor is this server's vote
 	votedFor 	int 			  // candidateId the server voted for in current term, nil if none
 	logs 		[]LogEntry		  // each LogEntry contains command, term when received by leader, first index = 1
 	// volatile
@@ -265,6 +266,17 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+	rf.currentRole = follower	// TODO: check the initial role of a server
+	rf.currentTerm = 0
+	rf.voted = false
+	rf.votedFor = 0
+	rf.logs = make([]LogEntry, 1)
+	// volatile data
+	rf.commitIndex = 0
+	rf.lastApplied = 0
+	// volatile data on leaders
+	rf.nextIndex = make([]int, len(rf.peers))
+	rf.matchIndex = make([]int, len(rf.peers))
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
