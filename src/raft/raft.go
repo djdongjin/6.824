@@ -26,7 +26,7 @@ import "../labrpc"
 
 
 
-//
+// ApplyMsg : returned to services.
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
 // tester) on the same server, via the applyCh passed to Make(). set
@@ -43,8 +43,7 @@ type ApplyMsg struct {
 	CommandIndex int
 }
 
-//
-// A Go object implementing a single Raft peer.
+// Raft : A Go object implementing a single Raft peer.
 //
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
@@ -56,16 +55,42 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-
+	// persistent
+	currentRole RaftRole		  // Leader, Candidate, Follower
+	currentTerm int				  // latest term the serer has seen, init to 0
+	votedFor 	int 			  // candidateId the server voted for in current term, nil if none
+	logs 		[]LogEntry		  // each LogEntry contains command, term when received by leader, first index = 1
+	// volatile
+	commitIndex int				  // highest log committed, init to 0 (none was committed, logs start at 1)
+	lastApplied int				  // highest log applied to state machine, init to 0
+	// volatile on leaders only
+	// *re-init after each election*
+	nextIndex 	[]int			  // next log entry to send to a server, init to leader's last log + 1
+	matchIndex	[]int			  // highest log entry known to be replicated on that server, init to 0
 }
 
-// return currentTerm and whether this server
+// RaftRole : one of three roles
+type RaftRole int
+const (
+	leader	  RaftRole = 0
+	candidate RaftRole = 1
+	follower  RaftRole = 2
+)
+
+// LogEntry : a LogEntry contains command and term.
+type LogEntry struct {
+	term int
+}
+
+// GetState : return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 
 	var term int
 	var isleader bool
 	// Your code here (2A).
+	term = rf.currentTerm
+	isleader = rf.currentRole == leader
 	return term, isleader
 }
 
@@ -117,6 +142,10 @@ func (rf *Raft) readPersist(data []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
+	term		 int	// candidate's term
+	candidateId  int	// candidateId (rf.me)
+	lastLogIndex int	// candidate's last log entry (correspond to rf.logs[-1])
+	lastLogTerm  int	// term of last log entry (correspond to rf.logs[-1].term)
 }
 
 //
@@ -125,6 +154,8 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
+	term 		int		// follower.currentTerm, for candidate to update itself if needed
+	voteGranted bool	// true if received vote (remember to change follower.voteFor)
 }
 
 //
