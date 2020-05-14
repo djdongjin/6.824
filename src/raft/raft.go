@@ -337,7 +337,7 @@ func (rf *Raft) leaderElection() {
 		}
 		// 3. election result
 		rf.mu.Lock()
-		for rf.voteCount < (numPeers + 1) / 2 && rf.voteFinished < numPeers {
+		for rf.voteCount < numPeers / 2 && rf.voteFinished < numPeers {
 			cond.Wait()
 		}
 		DPrintf("%v election results: %v finised, %v voted, voteInvalid: %v\n", rf.me, rf.voteFinished, rf.voteCount, rf.voteFailed)
