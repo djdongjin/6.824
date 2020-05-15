@@ -24,6 +24,7 @@ import (
 	"../labrpc"
 	"math"
 	"math/rand"
+	"fmt"
 )
 
 // import "bytes"
@@ -193,6 +194,7 @@ func (rf *Raft) changeToLeader(term int) {
 	rf.currentTerm = term
 	rf.currentRole = leader
 	nextLogIndex := len(rf.logs)
+	DPrintf("New Leader (%v) change nextIndex to (%v)\n", rf.me, nextLogIndex)
 	for idxPeer := range rf.peers {
 		rf.nextIndex[idxPeer] = nextLogIndex
 		rf.matchIndex[idxPeer] = 0
@@ -404,25 +406,37 @@ type AppendEntriesReply struct {
 	Success bool			// true if follower contained entry matching prevLogIndex, prevLogTerm
 }
 
+func (args AppendEntriesArgs) String() string {
+	return fmt.Sprintf("AppendEntriesArgs: Term(%v) Leader(ID,Commit)(%v,%v) PrevLog(Idx,Term)(%v,%v) Entries(%v)", 
+		args.Term, args.LeaderId, args.LeaderCommit,
+		args.PrevLogIndex, args.PrevLogTerm, args.Entries)
+}
+
+func (reply AppendEntriesReply) String() string {
+	return fmt.Sprintf("AppendEntriesReply: ServerTerm(%v) Success(%v)",
+		reply.Term, reply.Success)
+}
+
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	DPrintf("AppendEntries (%v<-%v), Term: (%v <- %v), len(msg): (%v)\n", rf.me, args.LeaderId, rf.currentTerm, args.Term, len(args.Entries))
+	DPrintf("AppendEntries(%v<-%v) Term(%v<-%v) args: %s\n", 
+		rf.me, args.LeaderId, rf.currentTerm, args.Term, args)
 	reply.Term = rf.currentTerm
 	// 1. return false, since leader term < follower term
 	if args.Term < rf.currentTerm {
-		reply.Success = false;
+		reply.Success = false
 		return
 	} else if args.Term > rf.currentTerm {
-		rf.currentRole = follower
+		rf.changeToFollower(args.Term)
 	}
 	// 2. return false, since no log at PrevLogIndex match with leader
 	idxOfPrevLog := rf.findIdxOfIndex(args.PrevLogIndex)
 	if idxOfPrevLog == -1 || rf.logs[idxOfPrevLog].Term != args.PrevLogTerm {
 		reply.Success = false
 		rf.lastTick = time.Now()
-		DPrintf("AppendEntries (%v<-%v), Term: (%v<-%v), preLogIdx: (%v): current logs: %v\n", 
-				rf.me, args.LeaderId, rf.currentTerm, args.Term, args.PrevLogIndex, rf.logs)
+		DPrintf("AppendEntries(%v<-%v) refused Term(%v<-%v) curLog(%v) args: %s\n", 
+				rf.me, args.LeaderId, rf.currentTerm, args.Term, rf.logs, args)
 		return
 	}
 	// 3 & 4: clean conflict logs and append new logs
@@ -448,23 +462,31 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = int(math.Min(float64(args.LeaderCommit), float64(rf.logs[len(rf.logs)-1].Index)))
 	}
-	for applied := rf.lastApplied + 1; applied <= rf.commitIndex; applied++ {
-		msg := ApplyMsg{Command:rf.logs[applied].Command, CommandIndex:applied, CommandValid:true}
+	for rf.lastApplied < rf.commitIndex {
+		rf.lastApplied++
+		DPrintf("AppendEntries(%v<-%v) Term(%v<-%v), commit msg(%v)\n", 
+			rf.me, args.LeaderId, rf.currentTerm, args.Term, rf.logs[rf.lastApplied])
+		msg := ApplyMsg{Command:rf.logs[rf.lastApplied].Command, CommandIndex:rf.lastApplied, CommandValid:true}
 		rf.applyCh <- msg
-		DPrintf("AppendEntries (%v<-%v), Term (%v<-%v), commit msg (%v)\n", rf.me, args.LeaderId, rf.currentTerm, args.Term, rf.logs[applied])
 	}
 	// close heartbeat power
 	rf.lastTick = time.Now() 
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) (bool) {
-	DPrintf("sendAppendEntries (%v->%v), Term: (%v)\n", rf.me, server, args.Term)
+	DPrintf("sendAppendEntries(%v->%v) args: %s\n", 
+		rf.me, server, args)
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	if ok {
+		DPrintf("sendAppendEntries(%v->%v) reply %s", rf.me, server, reply)
+	} else {
+		DPrintf("sendAppendEntries(%v->%v) failed!\n", rf.me, server)
+	}
 	return ok
 }
 
 func (rf *Raft) heartbeat() {
-	DPrintf("heartbeat (%v)\n", rf.me)
+	DPrintf("heartbeat(%v) start!\n", rf.me)
 	for {
 		time.Sleep(time.Duration(120) * time.Millisecond)
 		rf.mu.Lock()
@@ -499,7 +521,7 @@ func (rf *Raft) heartbeat() {
 		}
 		rf.mu.Unlock()
 	}
-	DPrintf("heartbeat (%v) end\n", rf.me)
+	DPrintf("heartbeat(%v) end!\n", rf.me)
 }
 
 //
@@ -539,78 +561,88 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			continue
 		}
 		if index >= rf.nextIndex[idxPeer] {
-			go func(idx int) {
-				args := AppendEntriesArgs{
-					Term: rf.currentTerm,
-					LeaderId: rf.me,
-					Entries: rf.logs[rf.nextIndex[idx]:],
-					PrevLogIndex: rf.nextIndex[idx] - 1,
-					PrevLogTerm: rf.logs[rf.nextIndex[idx] - 1].Term,
-					LeaderCommit: rf.commitIndex}
-				reply := AppendEntriesReply{}
-				for {
-					ok := rf.sendAppendEntries(idx, &args, &reply)
-					rf.mu.Lock()
-					curTerm := rf.currentTerm
-					killed := rf.killed()
-					rf.mu.Unlock()
-					if !ok {
-						continue
-					}
-					if curTerm != args.Term || killed {
-						break
-					}
-					if reply.Success {
-						rf.mu.Lock()
-						rf.nextIndex[idx] = len(rf.logs)
-						rf.matchIndex[idx] = args.PrevLogIndex + len(args.Entries)
-						rf.mu.Unlock()
-						break
-					} else {
-						rf.mu.Lock()
-						if rf.currentTerm < reply.Term {
-							// convert to follower
-							rf.currentRole = follower
-							rf.mu.Unlock()
-							break
-						} else {
-							// decrement nextIndex and retry
-							rf.nextIndex[idx]--
-							args.PrevLogIndex = rf.nextIndex[idx] - 1
-							args.PrevLogTerm = rf.logs[rf.nextIndex[idx] - 1].Term
-							args.Entries = rf.logs[rf.nextIndex[idx]:]
-							rf.mu.Unlock()
-							time.Sleep(10 * time.Millisecond)
-						}
-					}
-				}
-				// change commitIndex
-				rf.mu.Lock()
-				if !rf.killed() {
-					for idxLog := len(rf.logs) - 1; rf.currentRole == leader && rf.logs[idxLog].Term == rf.currentTerm && idxLog > rf.commitIndex; idxLog-- {
-						cnt := 0
-						for idxPeer := range rf.peers {
-							if rf.matchIndex[idxPeer] >= idxLog {
-								cnt++
-							}
-							if cnt > len(rf.peers) / 2 {
-								rf.commitIndex = idxLog
-								break
-							}
-						}
-					}
-					for applied := rf.lastApplied + 1; applied <= rf.commitIndex; applied++ {
-						DPrintf("leader %v commit msg (%v) at index (%v)\n", rf.me, rf.logs[applied], applied)
-						msg := ApplyMsg{Command:rf.logs[applied].Command, CommandIndex:applied, CommandValid:true}
-						rf.applyCh <- msg
-					}
-					rf.lastApplied = rf.commitIndex
-				}
-				rf.mu.Unlock()
-			}(idxPeer)
+			prevLogIdx := rf.nextIndex[idxPeer] - 1
+			go rf.startSendAppendEntries(idxPeer, rf.currentTerm, rf.me, 
+				prevLogIdx, rf.logs[prevLogIdx].Term, rf.commitIndex, 
+				rf.logs[prevLogIdx+1:])
 		}
 	}
 	return index, term, isLeader
+}
+
+func (rf *Raft) startSendAppendEntries(
+	idxPeer, term, leaderId, prevLogIdx, prevLogTerm, 
+	leaderCommit int, entries []LogEntry) {
+	args := AppendEntriesArgs{
+		Term: term,
+		LeaderId: leaderId,
+		PrevLogIndex: prevLogIdx,
+		PrevLogTerm: prevLogTerm,
+		LeaderCommit: leaderCommit,
+		Entries: entries}
+	reply := AppendEntriesReply{}
+	for {
+		ok := rf.sendAppendEntries(idxPeer, &args, &reply)
+		if !ok {
+			time.Sleep(100 * time.Millisecond)	// wait a moment before resend
+			continue
+		}
+		rf.mu.Lock()
+		if rf.currentTerm != args.Term || rf.killed() {
+			// either the server is killed or the RPC is outdated
+			rf.mu.Unlock()
+			return
+		}
+		if reply.Success {
+			// RPC succeeded without conflict
+			DPrintf("change nextIndex[%v]: %v->%v\n", idxPeer, rf.nextIndex[idxPeer], args.PrevLogIndex + len(args.Entries) + 1)
+			rf.nextIndex[idxPeer] = args.PrevLogIndex + len(args.Entries) + 1
+			rf.matchIndex[idxPeer] = args.PrevLogIndex + len(args.Entries)
+			rf.mu.Unlock()
+			break
+		} else if rf.currentTerm < reply.Term {
+			// RPC failed due to a new leader, change to folower
+			rf.changeToFollower(reply.Term)
+			rf.mu.Unlock()
+			break
+		} else {
+			// RPC failed due to a conflict LogEntry
+			DPrintf("%v\n", rf.nextIndex[idxPeer])
+			rf.nextIndex[idxPeer]--
+			DPrintf("%v\n", rf.nextIndex[idxPeer])
+			DPrintf("%s\n", args)
+			DPrintf("%s\n", reply)
+			args.PrevLogIndex = rf.nextIndex[idxPeer] - 1
+			args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
+			args.Entries = rf.logs[rf.nextIndex[idxPeer]:]
+			DPrintf("New args: %s\n", args)
+			rf.mu.Unlock()
+			// time.Sleep(100 * time.Millisecond)	// wait a moment before resend
+		}
+	}
+	// change commitIndex if the server is still leader
+	rf.mu.Lock()
+	if !rf.killed() && rf.currentRole == leader {
+		for idxLog := len(rf.logs) - 1; rf.logs[idxLog].Term == rf.currentTerm && idxLog > rf.commitIndex; idxLog-- {
+			cnt := 0
+			for idxServer := range rf.peers {
+				if rf.matchIndex[idxServer] >= idxLog {
+					cnt++
+				}
+				if cnt > len(rf.peers) / 2 {
+					rf.commitIndex = idxLog
+					break
+				}
+			}
+		}
+		for applied := rf.lastApplied + 1; applied <= rf.commitIndex; applied++ {
+			DPrintf("leader %v commit msg (%v) at index (%v)\n", rf.me, rf.logs[applied], applied)
+			msg := ApplyMsg{Command:rf.logs[applied].Command, CommandIndex:applied, CommandValid:true}
+			rf.applyCh <- msg
+		}
+		rf.lastApplied = rf.commitIndex
+	}
+	rf.mu.Unlock()
 }
 
 //
