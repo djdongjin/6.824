@@ -314,7 +314,7 @@ func (rf *Raft) leaderElection() {
 			break
 		}
 		// 0. start timeout
-		timeout := time.Duration(rand.Intn(150) + 200) * time.Millisecond
+		timeout := time.Duration(rand.Intn(150) + 300) * time.Millisecond
 		time.Sleep(timeout)
 		rf.mu.Lock()
 		timeElapse := time.Since(rf.lastTick)
@@ -466,7 +466,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 func (rf *Raft) heartbeat() {
 	DPrintf("heartbeat (%v)\n", rf.me)
 	for {
-		time.Sleep(time.Duration(150) * time.Millisecond)
+		time.Sleep(time.Duration(120) * time.Millisecond)
 		rf.mu.Lock()
 		role := rf.currentRole
 		killed := rf.killed()
