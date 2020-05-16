@@ -307,20 +307,17 @@ func (rf *Raft) leaderElection() {
 		DPrintf("leaderElection (%v), since last time: (%v)\n", rf.me, time.Since(t))
 		t = time.Now()
 		rf.mu.Lock()
-		killed := rf.killed()
-		role := rf.currentRole
-		// rf.lastTick = time.Now()		// start timeout before election
-		rf.mu.Unlock()
-		if killed || role == leader {
+		if rf.killed() || rf.currentRole == leader {
 			// server is closed or already elected, end leaderElection
+			rf.mu.Unlock()
 			break
 		}
+		rf.mu.Unlock()
 		// 0. start timeout
 		timeout := time.Duration(rand.Intn(150) + 300) * time.Millisecond
 		time.Sleep(timeout)
 		rf.mu.Lock()
 		timeElapse := time.Since(rf.lastTick)
-		rf.lastTick = time.Now()
 		rf.mu.Unlock()
 		if timeElapse < timeout {
 			// heartbeat|AppendEntries RPC received, next round
@@ -337,6 +334,7 @@ func (rf *Raft) leaderElection() {
 func (rf *Raft) startVoting() {
 	// 1. do election
 	rf.mu.Lock()
+	rf.lastTick = time.Now()
 	rf.changeToCandidate(rf.currentTerm + 1)
 	// prepare params for RequestVote RPC.
 	lastLogIndex, lastLogTerm := rf.lastLogIndexTerm()
@@ -375,7 +373,7 @@ func (rf *Raft) startVoting() {
 		cond.Wait()
 	}
 	DPrintf("leaderElection (%v) results: #peers (%v), #finised (%v), #voted (%v)\n", rf.me, len(rf.peers), rf.voteFinished, rf.voteCount)
-	if rf.currentRole == follower {
+	if rf.currentRole != candidate || curTerm != rf.currentTerm {
 		// 3.1: other server claims leadership, convert to follower (already)
 	} else if rf.voteCount > numPeers / 2 {
 		// 3.2: majority vote, succeed
@@ -423,18 +421,20 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	DPrintf("AppendEntries(%v<-%v) Term(%v<-%v) args: %s\n", 
 		rf.me, args.LeaderId, rf.currentTerm, args.Term, args)
 	reply.Term = rf.currentTerm
+	reply.Success = false
 	// 1. return false, since leader term < follower term
 	if args.Term < rf.currentTerm {
-		reply.Success = false
 		return
-	} else if args.Term > rf.currentTerm {
+	}
+	// now we can ensure that the RPC is from the current leader, so reset timer
+	rf.lastTick = time.Now()
+	if args.Term > rf.currentTerm {
 		rf.changeToFollower(args.Term)
 	}
 	// 2. return false, since no log at PrevLogIndex match with leader
 	idxOfPrevLog := rf.findIdxOfIndex(args.PrevLogIndex)
 	if idxOfPrevLog == -1 || rf.logs[idxOfPrevLog].Term != args.PrevLogTerm {
 		reply.Success = false
-		rf.lastTick = time.Now()
 		DPrintf("AppendEntries(%v<-%v) refused Term(%v<-%v) curLog(%v) args: %s\n", 
 				rf.me, args.LeaderId, rf.currentTerm, args.Term, rf.logs, args)
 		return
@@ -460,17 +460,19 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	// 5. update commitIndex
 	if args.LeaderCommit > rf.commitIndex {
-		rf.commitIndex = int(math.Min(float64(args.LeaderCommit), float64(rf.logs[len(rf.logs)-1].Index)))
+		oldCommitIdx := rf.commitIndex
+		rf.commitIndex = int(math.Min(float64(args.LeaderCommit), float64(len(rf.logs) - 1)))
+		DPrintf("AppendEntries(%v<-%v) Term(%v<-%v), update commitIdx(%v->%v)\n",
+			rf.me, args.LeaderId, rf.currentTerm, args.Term, oldCommitIdx, rf.commitIndex)
 	}
+	// apply committed command
 	for rf.lastApplied < rf.commitIndex {
 		rf.lastApplied++
-		DPrintf("AppendEntries(%v<-%v) Term(%v<-%v), commit msg(%v)\n", 
+		DPrintf("AppendEntries(%v<-%v) Term(%v<-%v), apply commit msg(%v)\n", 
 			rf.me, args.LeaderId, rf.currentTerm, args.Term, rf.logs[rf.lastApplied])
 		msg := ApplyMsg{Command:rf.logs[rf.lastApplied].Command, CommandIndex:rf.lastApplied, CommandValid:true}
 		rf.applyCh <- msg
 	}
-	// close heartbeat power
-	rf.lastTick = time.Now() 
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) (bool) {
@@ -486,22 +488,22 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 }
 
 func (rf *Raft) heartbeat() {
+	rf.mu.Lock()
+	startTerm := rf.currentTerm
+	rf.mu.Unlock()
 	DPrintf("heartbeat(%v) start!\n", rf.me)
 	for {
-		time.Sleep(time.Duration(120) * time.Millisecond)
 		rf.mu.Lock()
-		role := rf.currentRole
-		killed := rf.killed()
-		rf.mu.Unlock()
-		if role != leader || killed {
+		if rf.currentTerm != startTerm || rf.currentRole != leader || rf.killed() {
+			rf.mu.Unlock()
 			break
 		}
-		rf.mu.Lock()
 		prevLogIdx, prevLogTerm := rf.lastLogIndexTerm()
 		for idxPeer := range rf.peers {
 			if idxPeer == rf.me {
 				continue
 			}
+			// go rf.startSendAppendEntries(idxPeer, rf.currentTerm, rf.me, prevLogIdx, prevLogTerm, rf.commitIndex, rf.logs[rf.nextIndex[idxPeer]:])
 			go func(idxPeer, term, leaderId, prevLogIndex, prevLogTerm, leaderCommit int, entries []LogEntry) {
 				args := AppendEntriesArgs{
 					Term:term, LeaderId:leaderId,
@@ -520,6 +522,7 @@ func (rf *Raft) heartbeat() {
 			} (idxPeer, rf.currentTerm, rf.me, prevLogIdx, prevLogTerm, rf.commitIndex, nil)
 		}
 		rf.mu.Unlock()
+		time.Sleep(time.Duration(120) * time.Millisecond)
 	}
 	DPrintf("heartbeat(%v) end!\n", rf.me)
 }
@@ -595,7 +598,8 @@ func (rf *Raft) startSendAppendEntries(
 		}
 		if reply.Success {
 			// RPC succeeded without conflict
-			DPrintf("change nextIndex[%v]: %v->%v\n", idxPeer, rf.nextIndex[idxPeer], args.PrevLogIndex + len(args.Entries) + 1)
+			DPrintf("change nextIndex[%v]: %v->%v\n", 
+				idxPeer, rf.nextIndex[idxPeer], args.PrevLogIndex + len(args.Entries) + 1)
 			rf.nextIndex[idxPeer] = args.PrevLogIndex + len(args.Entries) + 1
 			rf.matchIndex[idxPeer] = args.PrevLogIndex + len(args.Entries)
 			rf.mu.Unlock()
@@ -617,7 +621,6 @@ func (rf *Raft) startSendAppendEntries(
 			args.Entries = rf.logs[rf.nextIndex[idxPeer]:]
 			DPrintf("New args: %s\n", args)
 			rf.mu.Unlock()
-			// time.Sleep(100 * time.Millisecond)	// wait a moment before resend
 		}
 	}
 	// change commitIndex if the server is still leader
