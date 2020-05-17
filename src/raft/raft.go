@@ -22,9 +22,11 @@ import (
 	"sync"
 	"sync/atomic"
 	"../labrpc"
+	"../labgob"
 	"math"
 	"math/rand"
 	"fmt"
+	"bytes"
 )
 
 // import "bytes"
@@ -130,6 +132,16 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	// e.Encode(rf.currentRole)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.voted)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.logs)
+	e.Encode(rf.numCompact)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -152,6 +164,28 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	// var a RaftRole
+	var b int
+	var c bool
+	var x int
+	var y []LogEntry
+	var z int
+	if d.Decode(&b) != nil ||
+	   d.Decode(&c) != nil ||
+	   d.Decode(&x) != nil ||
+	   d.Decode(&y) != nil ||
+       d.Decode(&z) != nil {
+        DPrintf("readPersist error!!!")
+	} else {
+		// rf.currentRole = a
+		rf.currentTerm = b
+		rf.voted       = c
+		rf.votedFor    = x
+		rf.logs 	   = y
+		rf.numCompact  = z
+	}
 }
 
 
@@ -163,18 +197,10 @@ func (rf *Raft) readPersist(data []byte) {
 // return -1 if the log with index is not found.
 // attention: call it inside rf.mu.Lock(), as the function itself doesn't check lock.
 func (rf *Raft) findIdxOfIndex(index int) (int) {
-// 	for l := len(rf.logs) - 1; l >= 0; l-- {
-// 		if rf.logs[l].Index == index {
-// 			return l
-// 		}
-// 	}
-// 	return -1
-// }
 	if index >= len(rf.logs) {
 		return -1
-	} else {
-		return index
 	}
+	return index
 }
 
 // return the index and term of the last log,
@@ -258,11 +284,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	} else if args.Term > rf.currentTerm {
 		// next term, reset vote information first
 		rf.changeToFollower(args.Term)
+		rf.persist()
 	} 
 	// 2. whether vote for candidate, Figure 2. RequestVote Impl 2.
 	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && rf.behind(args.LastLogIndex, args.LastLogTerm) {
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
+		rf.persist()
 		rf.lastTick = time.Now()
 	}
 	DPrintf("RequestVote %v (%v<-%v), Term: (%v<-%v)\n", reply.VoteGranted, rf.me, args.CandidateId, rf.currentTerm, args.Term)
@@ -337,6 +365,7 @@ func (rf *Raft) startVoting() {
 	rf.mu.Lock()
 	rf.lastTick = time.Now()
 	rf.changeToCandidate(rf.currentTerm + 1)
+	rf.persist()
 	// prepare params for RequestVote RPC.
 	lastLogIndex, lastLogTerm := rf.lastLogIndexTerm()
 	numPeers, me, curTerm := len(rf.peers), rf.me, rf.currentTerm	// to unlock earlier
@@ -363,6 +392,7 @@ func (rf *Raft) startVoting() {
 				} else if reply.Term > rf.currentTerm {
 					// someone has higher term, election failed, change to follower.
 					rf.changeToFollower(reply.Term)
+					rf.persist()
 				}
 			}
 			cond.Broadcast()
@@ -381,6 +411,7 @@ func (rf *Raft) startVoting() {
 		// 3.2: majority vote, succeed
 		DPrintf("%v becomes leader!!\n", rf.me)
 		rf.changeToLeader(rf.currentTerm)
+		rf.persist()
 		go rf.heartbeat()
 	}
 		// 3.3: non-majority vote, fail.
@@ -432,6 +463,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.lastTick = time.Now()
 	if args.Term > rf.currentTerm {
 		rf.changeToFollower(args.Term)
+		rf.persist()
 	}
 	// 2. return false, since no log at PrevLogIndex match with leader
 	idxOfPrevLog := rf.findIdxOfIndex(args.PrevLogIndex)
@@ -449,11 +481,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			if idxOfNewLog == -1 {
 				// append new entries
 				rf.logs = append(rf.logs, args.Entries[i:]...)
+				rf.persist()
 				break
 			} else if entry.Term != rf.logs[idxOfNewLog].Term {
 				// delete existing conflict logs
 				rf.logs = rf.logs[:idxOfNewLog]
 				rf.logs = append(rf.logs, args.Entries[i:]...)
+				rf.persist()
 				break
 			} else {
 				// this entry has been in logs, check next one
@@ -545,7 +579,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	defer rf.mu.Unlock()
 	index = len(rf.logs)
 	rf.logs = append(rf.logs, LogEntry{Term:term, Index:index, Command:command})
-	
+	rf.persist()
 	for idxPeer := range rf.peers {
 		if idxPeer == rf.me {
 			rf.nextIndex[rf.me] = len(rf.logs)
@@ -576,7 +610,7 @@ func (rf *Raft) startSendAppendEntries(
 	for {
 		ok := rf.sendAppendEntries(idxPeer, &args, &reply)
 		if !ok {
-			time.Sleep(100 * time.Millisecond)	// wait a moment before resend
+			time.Sleep(10 * time.Millisecond)	// wait a moment before resend
 			continue
 		}
 		rf.mu.Lock()
@@ -596,11 +630,14 @@ func (rf *Raft) startSendAppendEntries(
 		} else if rf.currentTerm < reply.Term {
 			// RPC failed due to a new leader, change to folower
 			rf.changeToFollower(reply.Term)
+			rf.persist()
 			rf.mu.Unlock()
 			break
 		} else {
 			// RPC failed due to a conflict LogEntry
-			rf.nextIndex[idxPeer]--
+			if rf.nextIndex[idxPeer] == args.PrevLogIndex + 1 {
+				rf.nextIndex[idxPeer]--
+			}
 			args.PrevLogIndex = rf.nextIndex[idxPeer] - 1
 			args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
 			args.Entries = rf.logs[rf.nextIndex[idxPeer]:]
@@ -691,12 +728,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.lastTick = time.Now()
 	rf.applyCh = applyCh
-	//
-	go rf.leaderElection()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
+	go rf.leaderElection()
 
 	return rf
 }
