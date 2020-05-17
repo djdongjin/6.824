@@ -80,9 +80,6 @@ type Raft struct {
 	// helper variables
 	lastTick	time.Time	 	  // election power, set true at the begining
 								  // if still true after timeout, then electing, AppendEntries will set it to false
-	voteCount	 int			  // record #vote granted during election
-	voteFinished int			  // record #vote finished during election  
-
 	applyCh		chan ApplyMsg
 }
 
@@ -233,8 +230,6 @@ func (rf *Raft) changeToCandidate(term int) {
 	rf.currentTerm = term
 	rf.currentRole = candidate
 	rf.votedFor = rf.me
-	rf.voteCount = 1
-	rf.voteFinished = 1
 }
 
 func (rf *Raft) changeToFollower(term int) {
@@ -372,6 +367,7 @@ func (rf *Raft) startVoting() {
 	rf.mu.Unlock()
 	cond := sync.NewCond(&rf.mu)
 	// spread out RequestVote RPC
+	voteFinished, voteCount := 1, 1
 	for idxPeer := 0; idxPeer < numPeers; idxPeer++ {
 		if idxPeer == me {
 			continue
@@ -386,9 +382,9 @@ func (rf *Raft) startVoting() {
 			defer rf.mu.Unlock()
 			if args.Term == rf.currentTerm {
 				// only process reply if it isn't outdated
-				rf.voteFinished++
+				voteFinished++
 				if reply.VoteGranted {
-					rf.voteCount++
+					voteCount++
 				} else if reply.Term > rf.currentTerm {
 					// someone has higher term, election failed, change to follower.
 					rf.changeToFollower(reply.Term)
@@ -400,14 +396,14 @@ func (rf *Raft) startVoting() {
 	}
 	// 3. election result
 	rf.mu.Lock()
-	for rf.currentRole == candidate && rf.voteCount <= numPeers / 2 && rf.voteFinished < numPeers {
+	for rf.currentRole == candidate && voteCount <= numPeers / 2 && voteFinished < numPeers {
 		cond.Wait()
 	}
 	DPrintf("leaderElection (%v) results: #peers (%v), #finised (%v), #voted (%v)\n", 
-		rf.me, len(rf.peers), rf.voteFinished, rf.voteCount)
+		rf.me, len(rf.peers), voteFinished, voteCount)
 	if rf.currentRole != candidate || curTerm != rf.currentTerm {
 		// 3.1: other server claims leadership, convert to follower (already)
-	} else if rf.voteCount > numPeers / 2 {
+	} else if voteCount > numPeers / 2 {
 		// 3.2: majority vote, succeed
 		DPrintf("%v becomes leader!!\n", rf.me)
 		rf.changeToLeader(rf.currentTerm)
