@@ -377,11 +377,17 @@ func (rf *Raft) startVoting() {
 			args := RequestVoteArgs{Term:term, CandidateId:candidateId,
 									LastLogIndex:lastLogIndex, LastLogTerm:lastLogTerm}
 			reply := RequestVoteReply{}
-			rf.sendRequestVote(idxPeer, &args, &reply)
-			rf.mu.Lock()
-			defer rf.mu.Unlock()
-			if args.Term == rf.currentTerm {
+			for {
+				ok := rf.sendRequestVote(idxPeer, &args, &reply)
+				if !ok {
+					time.Sleep(10 * time.Millisecond)	// wait a moment before resend
+					continue
+				}
+				rf.mu.Lock()
 				// only process reply if it isn't outdated
+				if args.Term != rf.currentTerm {
+					break
+				}
 				voteFinished++
 				if reply.VoteGranted {
 					voteCount++
@@ -390,8 +396,10 @@ func (rf *Raft) startVoting() {
 					rf.changeToFollower(reply.Term)
 					rf.persist()
 				}
+				break
 			}
 			cond.Broadcast()
+			rf.mu.Unlock()
 		} (idxPeer, curTerm, me, lastLogIndex, lastLogTerm)
 	}
 	// 3. election result
@@ -493,7 +501,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// 5. update commitIndex
 	if args.LeaderCommit > rf.commitIndex {
 		oldCommitIdx := rf.commitIndex
-		rf.commitIndex = int(math.Min(float64(args.LeaderCommit), float64(len(rf.logs) - 1)))
+		rf.commitIndex = int(math.Min(float64(args.LeaderCommit), float64(args.PrevLogIndex + len(args.Entries))))
 		DPrintf("AppendEntries(%v<-%v) Term(%v<-%v), update commitIdx(%v->%v)\n",
 			rf.me, args.LeaderId, rf.currentTerm, args.Term, oldCommitIdx, rf.commitIndex)
 	}
