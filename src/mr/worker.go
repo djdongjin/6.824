@@ -4,7 +4,11 @@ import "fmt"
 import "log"
 import "net/rpc"
 import "hash/fnv"
-
+import "os"
+import "time"
+import "io/ioutil"
+import "sort"
+import "encoding/json"
 
 //
 // Map functions return a slice of KeyValue.
@@ -25,6 +29,96 @@ func ihash(key string) int {
 }
 
 
+// for sorting by key.
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
+
+
+func mapper(mapf func(string, string) []KeyValue, reply *MRReply) bool {
+	// 1. read []KeyValue with mapf
+	inpFile := reply.InpFiles[0]	// for map tasks, there is only one input file.
+	file, err := os.Open(inpFile)
+	if err != nil {
+		log.Fatalf("cannot open %v", inpFile)
+	}
+	content, err := ioutil.ReadAll(file)
+	if err != nil {
+		log.Fatalf("cannot read %v", inpFile)
+	}
+	file.Close()
+	kva := mapf(inpFile, string(content))
+
+	// 2. sort []KeyValue and output to mr-X-Y files.
+	sort.Sort(ByKey(kva))
+	hash2ikv := make([][]int, reply.NReduce)
+	for i := range kva {
+		h := ihash(kva[i].Key) % reply.NReduce
+		hash2ikv[h] = append(hash2ikv[h], i)
+	}
+	hash2outpFiles := make([]*os.File, reply.NReduce)
+	for i := range hash2outpFiles {
+		tmpFile, _ := ioutil.TempFile(".", "*")
+		hash2outpFiles[i] = tmpFile
+		enc := json.NewEncoder(hash2outpFiles[i])
+		for _, ikv := range hash2ikv[i] {
+			err := enc.Encode(&kva[ikv])
+			if err != nil {
+				log.Fatal("encoding error")
+			}
+		}
+		hash2outpFiles[i].Close()
+	}
+	// rename
+	for i, f := range hash2outpFiles {
+		os.Rename(f.Name(), fmt.Sprintf(reply.OutpFile + "%d", i))
+	}
+	log.Printf("Worker finish Map %d\n", reply.JobID)
+	return true;
+}
+
+func reducer(reducef func(string, []string) string, reply *MRReply) bool {
+	intermediate := []KeyValue{}
+	for _, filename := range reply.InpFiles {
+		ifile, _ := os.Open(filename)
+		dec := json.NewDecoder(ifile)
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			intermediate = append(intermediate, kv)
+		}
+		ifile.Close()
+	}
+	ofile, _ := ioutil.TempFile(".", "*")
+	sort.Sort(ByKey(intermediate))
+	i := 0
+	for i < len(intermediate) {
+		j := i + 1
+		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+			j++
+		}
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, intermediate[k].Value)
+		}
+		output := reducef(intermediate[i].Key, values)
+
+		// this is the correct format for each line of Reduce output.
+		fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+
+		i = j
+	}
+	ofile.Close()
+	os.Rename(ofile.Name(), reply.OutpFile)
+	log.Printf("Worker finish Reduce %d\n", reply.JobID)
+	return true
+}
+
 //
 // main/mrworker.go calls this function.
 //
@@ -32,6 +126,24 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// Your worker implementation here.
+	log.SetOutput(ioutil.Discard)
+    for {
+		args := MRArgs{}
+		reply := MRReply{}
+		call("Master.AskJob", &args, &reply)
+		log.Printf("Worker got job %s, %d\n", reply.JobName, reply.JobID)
+		if reply.JobName == "end" {
+			break
+		}
+		switch reply.JobName {
+		case "map":
+			mapper(mapf, &reply)
+		case "reduce":
+			reducer(reducef, &reply)
+		case "wait":
+			time.Sleep(5 * time.Second)
+		}
+	}
 
 	// uncomment to send the Example RPC to the master.
 	// CallExample()
