@@ -7,6 +7,7 @@ import (
 	"../raft"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const Debug = 0
@@ -23,7 +24,17 @@ type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Name  string
+	Key   string
+	Value string
 }
+
+type OpStatus string
+const (
+	start = "start"
+	succ  = "succ"
+	fail  = "fail"
+)
 
 type KVServer struct {
 	mu      sync.Mutex
@@ -35,15 +46,87 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	data	map[string]string
+	status	map[int]Op
+}
+
+
+func (kv *KVServer) receiveMsg() {
+	for !kv.killed() {
+		msg := <-kv.applyCh
+		DPrintf("Receive msg from Raft: %v\n", msg)
+		if msg.CommandValid {
+			op := msg.Command.(Op)
+			kv.mu.Lock()
+			kv.status[msg.CommandIndex] = op
+			val, ok := kv.data[op.Key]
+			if op.Name == "Put" {
+				kv.data[op.Key] = op.Value
+			} else if op.Name == "Append" {
+				if !ok {
+					val = ""
+				}
+				kv.data[op.Key] = val + op.Value
+			}
+			kv.mu.Unlock()
+		}
+	}
+}
+
+func (kv *KVServer) waitOpFinished(index int) Op {
+	var replyOp Op
+	var ok bool
+	for {
+		kv.mu.Lock()
+		replyOp, ok = kv.status[index]
+		if ok {
+			kv.mu.Unlock()
+			break
+		}
+		kv.mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
+	}
+	return replyOp
 }
 
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	op := Op{Name:"Get", Key:args.Key, Value:""}
+	index, _, isLeader := kv.rf.Start(op)
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+	replyOp := kv.waitOpFinished(index)
+	if replyOp != op {
+		reply.Err = ErrWrongLeader
+	} else {
+		reply.Err = ErrNoKey
+		kv.mu.Lock()
+		val, ok := kv.data[op.Key]
+		if ok {
+			reply.Err = OK
+			reply.Value = val
+		}
+		kv.mu.Unlock()
+	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	op := Op{Name:args.Op, Key:args.Key, Value:args.Value}
+	index, _, isLeader := kv.rf.Start(op)
+	if !isLeader {
+		reply.Err = ErrWrongLeader
+		return
+	}
+	replyOp := kv.waitOpFinished(index)
+	if replyOp != op {
+		reply.Err = ErrWrongLeader
+	} else {
+		reply.Err = OK
+	}
 }
 
 //
@@ -96,6 +179,10 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
+	kv.dead = 0
+	kv.data = make(map[string]string)
+	kv.status = make(map[int]Op)
+	go kv.receiveMsg()
 
 	return kv
 }
