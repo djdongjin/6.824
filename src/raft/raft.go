@@ -42,6 +42,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+	CommandTerm  int
 }
 
 // Raft : A Go object implementing a single Raft peer.
@@ -467,7 +468,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.lastApplied++
 		DPrintf("AppendEntries(%v<-%v) Term(%v<-%v), apply commit msg(%v)\n", 
 			rf.me, args.LeaderId, rf.currentTerm, args.Term, rf.logs[rf.lastApplied])
-		msg := ApplyMsg{Command:rf.logs[rf.lastApplied].Command, CommandIndex:rf.lastApplied, CommandValid:true}
+		msg := ApplyMsg{Command:rf.logs[rf.lastApplied].Command, CommandIndex:rf.lastApplied, CommandValid:true, CommandTerm:rf.logs[rf.lastApplied].Term}
 		rf.applyCh <- msg
 	}
 }
@@ -634,7 +635,7 @@ func (rf *Raft) startSendAppendEntries(
 		for rf.lastApplied < rf.commitIndex {
 			rf.lastApplied++
 			DPrintf("leader %v commit msg (%v) at index (%v)\n", rf.me, rf.logs[rf.lastApplied], rf.lastApplied)
-			msg := ApplyMsg{Command:rf.logs[rf.lastApplied].Command, CommandIndex:rf.lastApplied, CommandValid:true}
+			msg := ApplyMsg{Command:rf.logs[rf.lastApplied].Command, CommandIndex:rf.lastApplied, CommandValid:true, CommandTerm:rf.logs[rf.lastApplied].Term}
 			rf.applyCh <- msg
 		}
 	}

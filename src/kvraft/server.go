@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"fmt"
 )
 
 const Debug = 0
@@ -29,12 +30,9 @@ type Op struct {
 	Value string
 }
 
-type OpStatus string
-const (
-	start = "start"
-	succ  = "succ"
-	fail  = "fail"
-)
+func (op Op) String() string {
+	return fmt.Sprintf("%v: (%v,%v)", op.Name, op.Key, op.Value)
+}
 
 type KVServer struct {
 	mu      sync.Mutex
@@ -46,8 +44,10 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	data	map[string]string
-	status	map[int]Op
+	data	   map[string]string
+	idx2op	   map[int]Op
+	idx2term   map[int]int
+	idx2resend map[int]bool
 }
 
 
@@ -57,17 +57,22 @@ func (kv *KVServer) receiveMsg() {
 		DPrintf("Receive msg from Raft: %v\n", msg)
 		if msg.CommandValid {
 			op := msg.Command.(Op)
+			term := msg.CommandTerm
+			index := msg.CommandIndex
 			kv.mu.Lock()
-			kv.status[msg.CommandIndex] = op
+			
 			val, ok := kv.data[op.Key]
-			if op.Name == "Put" {
-				kv.data[op.Key] = op.Value
-			} else if op.Name == "Append" {
-				if !ok {
-					val = ""
+			if !(kv.idx2resend[index] && kv.idx2term[index] == term) {
+				if op.Name == "Put" {
+					kv.data[op.Key] = op.Value
+				} else if op.Name == "Append" {
+					if !ok {
+						val = ""
+					}
+					kv.data[op.Key] = val + op.Value
 				}
-				kv.data[op.Key] = val + op.Value
 			}
+			kv.idx2op[index] = op
 			kv.mu.Unlock()
 		}
 	}
@@ -78,7 +83,7 @@ func (kv *KVServer) waitOpFinished(index int) Op {
 	var ok bool
 	for {
 		kv.mu.Lock()
-		replyOp, ok = kv.status[index]
+		replyOp, ok = kv.idx2op[index]
 		if ok {
 			kv.mu.Unlock()
 			break
@@ -93,40 +98,52 @@ func (kv *KVServer) waitOpFinished(index int) Op {
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	op := Op{Name:"Get", Key:args.Key, Value:""}
-	index, _, isLeader := kv.rf.Start(op)
+	index, term, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
 	}
+	kv.mu.Lock()
+	kv.idx2resend[index] = false
+	kv.idx2term[index] = term
+	kv.mu.Unlock()
 	replyOp := kv.waitOpFinished(index)
+	kv.mu.Lock()
 	if replyOp != op {
+		kv.idx2resend[index] = true
 		reply.Err = ErrWrongLeader
 	} else {
 		reply.Err = ErrNoKey
-		kv.mu.Lock()
 		val, ok := kv.data[op.Key]
 		if ok {
 			reply.Err = OK
 			reply.Value = val
 		}
-		kv.mu.Unlock()
 	}
+	kv.mu.Unlock()
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
 	op := Op{Name:args.Op, Key:args.Key, Value:args.Value}
-	index, _, isLeader := kv.rf.Start(op)
+	index, term, isLeader := kv.rf.Start(op)
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
 	}
+	kv.mu.Lock()
+	kv.idx2resend[index] = false
+	kv.idx2term[index] = term
+	kv.mu.Unlock()
 	replyOp := kv.waitOpFinished(index)
+	kv.mu.Lock()
 	if replyOp != op {
+		kv.idx2resend[index] = true
 		reply.Err = ErrWrongLeader
 	} else {
 		reply.Err = OK
 	}
+	kv.mu.Unlock()
 }
 
 //
@@ -181,7 +198,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// You may need initialization code here.
 	kv.dead = 0
 	kv.data = make(map[string]string)
-	kv.status = make(map[int]Op)
+	kv.idx2op = make(map[int]Op)
+	kv.idx2term = make(map[int]int)
+	kv.idx2resend = make(map[int]bool)
 	go kv.receiveMsg()
 
 	return kv
