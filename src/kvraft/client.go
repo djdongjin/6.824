@@ -11,6 +11,7 @@ type Clerk struct {
 	// You will have to modify this struct.
 	curLeader int
 	mu        sync.Mutex
+	sids      map[int]bool
 }
 
 func nrand() int64 {
@@ -25,7 +26,12 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck.servers = servers
 	// You'll have to add code here.
 	ck.curLeader = 0
+	ck.sids = make(map[int]bool)
 	return ck
+}
+
+func (ck *Clerk) getSID() int64 {
+	return nrand()
 }
 
 //
@@ -43,17 +49,22 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
+	ck.mu.Lock()
 	ok    := false
-	args  := GetArgs{Key:key}
+	args  := GetArgs{Key:key, SID:ck.getSID()}
 	reply := GetReply{}
+	leader := ck.curLeader
+	ck.mu.Unlock()
 	for {
-		ck.mu.Lock()
-		ok = ck.servers[ck.curLeader].Call("KVServer.Get", &args, &reply)
+		ok = ck.servers[leader].Call("KVServer.Get", &args, &reply)
 		if ok && reply.Err != ErrWrongLeader {
-			ck.mu.Unlock()
 			break
 		}
-		ck.curLeader = (ck.curLeader + 1) % len(ck.servers)
+		ck.mu.Lock()
+		if ck.curLeader == leader {
+			ck.curLeader = (ck.curLeader + 1) % len(ck.servers)
+		}
+		leader = ck.curLeader
 		ck.mu.Unlock()
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -73,17 +84,22 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+	ck.mu.Lock()
 	ok := false
-	args := PutAppendArgs{Key:key, Value:value, Op:op}
+	args := PutAppendArgs{Key:key, Value:value, Op:op, SID:ck.getSID()}
 	reply := PutAppendReply{}
+	leader := ck.curLeader
+	ck.mu.Unlock()
 	for {
-		ck.mu.Lock()
-		ok = ck.servers[ck.curLeader].Call("KVServer.PutAppend", &args, &reply)
+		ok = ck.servers[leader].Call("KVServer.PutAppend", &args, &reply)
 		if ok && reply.Err != ErrWrongLeader {
-			ck.mu.Unlock()
 			break
 		}
-		ck.curLeader = (ck.curLeader + 1) % len(ck.servers)
+		ck.mu.Lock()
+		if ck.curLeader == leader {
+			ck.curLeader = (ck.curLeader + 1) % len(ck.servers)
+		}
+		leader = ck.curLeader
 		ck.mu.Unlock()
 		time.Sleep(10 * time.Millisecond)
 	}
