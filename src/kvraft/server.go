@@ -28,10 +28,19 @@ type Op struct {
 	Name  string
 	Key   string
 	Value string
+	SID   int64
+	UID	  int
 }
 
+type Status string
+const (
+	fail Status = "fail"
+	succ Status = "succ"
+	send Status = "send"
+)
+
 func (op Op) String() string {
-	return fmt.Sprintf("%v: (%v,%v)", op.Name, op.Key, op.Value)
+	return fmt.Sprintf("(%v,%v) (%v,%v)", op.Name, op.SID, op.Key, op.Value)
 }
 
 type KVServer struct {
@@ -45,101 +54,146 @@ type KVServer struct {
 
 	// Your definitions here.
 	data	   map[string]string
-	idx2op	   map[int]Op
-	idx2term   map[int]int
-	idx2resend map[int]bool
+	sid2status map[int]map[int64]Status
+	idx2uid	   map[int]int
+	idx2sid	   map[int]int64
+	getVal     map[int]map[int64]string
 }
 
 
 func (kv *KVServer) receiveMsg() {
 	for !kv.killed() {
 		msg := <-kv.applyCh
-		DPrintf("Receive msg from Raft: %v\n", msg)
+		DPrintf("%v Receive msg from Raft: %v\n", kv.me, msg)
 		if msg.CommandValid {
 			op := msg.Command.(Op)
-			term := msg.CommandTerm
 			index := msg.CommandIndex
 			kv.mu.Lock()
+			DPrintf("%v To access (UID,SID):(%v,%v)\n", kv.me, op.UID, op.SID)
+			if _, ok := kv.sid2status[op.UID]; !ok {
+				kv.sid2status[op.UID] = make(map[int64]Status)
+			}
 			
-			val, ok := kv.data[op.Key]
-			if !(kv.idx2resend[index] && kv.idx2term[index] == term) {
+			if status, ok := kv.sid2status[op.UID][op.SID]; !ok || status != succ {
+				kv.sid2status[op.UID][op.SID] = succ
+				DPrintf("%v Commit Op %s \n", kv.me, op)
+				prevUID, ok2 := kv.idx2uid[index]
+				prevSID, ok3 := kv.idx2sid[index]
+				if ok2 && prevUID != op.UID || 
+				   ok3 && prevSID != op.SID {
+					kv.sid2status[kv.idx2uid[index]][kv.idx2sid[index]] = fail
+				}
+				kv.idx2uid[index] = op.UID
+				kv.idx2sid[index] = op.SID
+				val, ok5 := kv.data[op.Key]
 				if op.Name == "Put" {
 					kv.data[op.Key] = op.Value
 				} else if op.Name == "Append" {
-					if !ok {
+					if !ok5 {
 						val = ""
 					}
 					kv.data[op.Key] = val + op.Value
+				} else {
+					if _, ok6 := kv.getVal[op.UID]; !ok6 {
+						kv.getVal[op.UID] = make(map[int64]string)
+					}
+					if _, ok6 := kv.data[op.Key]; ok6 {
+						kv.getVal[op.UID][op.SID] = kv.data[op.Key]
+					} else {
+						kv.getVal[op.UID][op.SID] = ""
+					}
 				}
 			}
-			kv.idx2op[index] = op
+			DPrintf("%v Status of (UID,SID):(%v,%v): %v\n", kv.me, op.UID, op.SID, kv.sid2status[op.UID][op.SID])
 			kv.mu.Unlock()
 		}
 	}
 }
 
-func (kv *KVServer) waitOpFinished(index int) Op {
-	var replyOp Op
-	var ok bool
+func (kv *KVServer) waitOpFinished(uid int, sid int64) Status {
+	i := 0
 	for {
 		kv.mu.Lock()
-		replyOp, ok = kv.idx2op[index]
-		if ok {
+		if kv.sid2status[uid][sid] != send {
 			kv.mu.Unlock()
-			break
+			return kv.sid2status[uid][sid]
 		}
 		kv.mu.Unlock()
+		i++
+		if i > 100 {
+			return fail
+		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	return replyOp
 }
 
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
-	op := Op{Name:"Get", Key:args.Key, Value:""}
-	index, term, isLeader := kv.rf.Start(op)
+	op := Op{Name:"Get", Key:args.Key, Value:"", SID:args.SID, UID:args.UID}
+	DPrintf("%v Op %s\n", kv.me, op)
+	reply.Err = ErrWrongLeader
+	index, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
-		reply.Err = ErrWrongLeader
 		return
 	}
+	var status Status
 	kv.mu.Lock()
-	kv.idx2resend[index] = false
-	kv.idx2term[index] = term
-	kv.mu.Unlock()
-	replyOp := kv.waitOpFinished(index)
-	kv.mu.Lock()
-	if replyOp != op {
-		kv.idx2resend[index] = true
-		reply.Err = ErrWrongLeader
+	if _, ok := kv.sid2status[args.UID]; !ok {
+		kv.sid2status[args.UID] = make(map[int64]Status)
+	}
+	if s, ok := kv.sid2status[args.UID][args.SID]; !ok || s != succ {
+		kv.sid2status[args.UID][args.SID] = send
+		kv.idx2sid[index] = args.SID 
+		kv.idx2uid[index] = args.UID
+		kv.mu.Unlock()
+		status = kv.waitOpFinished(args.UID, args.SID)
+		kv.mu.Lock()
 	} else {
-		reply.Err = ErrNoKey
-		val, ok := kv.data[op.Key]
-		if ok {
+		status = succ
+	}
+	if status == fail {
+		// return ErrWrongLeader
+	} else {
+		reply.Value = kv.getVal[args.UID][args.SID]
+		if reply.Value != "" {
 			reply.Err = OK
-			reply.Value = val
+		} else {
+			reply.Err = ErrNoKey
 		}
+		DPrintf("%v Return get val: (Key,UID,SID,status,err):(%v,%v,%v,%v,%v)\n%v\n", 
+			kv.me, args.Key, args.UID, args.SID, status, reply.Err,
+			reply.Value)
 	}
 	kv.mu.Unlock()
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-	op := Op{Name:args.Op, Key:args.Key, Value:args.Value}
-	index, term, isLeader := kv.rf.Start(op)
+	op := Op{Name:args.Op, Key:args.Key, Value:args.Value, SID:args.SID, UID:args.UID}
+	DPrintf("%v Op %s\n", kv.me, op)
+	reply.Err = ErrWrongLeader
+	index, _, isLeader := kv.rf.Start(op)
 	if !isLeader {
-		reply.Err = ErrWrongLeader
 		return
 	}
+	var status Status
 	kv.mu.Lock()
-	kv.idx2resend[index] = false
-	kv.idx2term[index] = term
-	kv.mu.Unlock()
-	replyOp := kv.waitOpFinished(index)
-	kv.mu.Lock()
-	if replyOp != op {
-		kv.idx2resend[index] = true
-		reply.Err = ErrWrongLeader
+	if _, ok := kv.sid2status[args.UID]; !ok {
+		kv.sid2status[args.UID] = make(map[int64]Status)
+	}
+	if s, ok := kv.sid2status[args.UID][args.SID]; !ok || s != succ {
+		kv.sid2status[args.UID][args.SID] = send
+		kv.idx2sid[index] = args.SID 
+		kv.idx2uid[index] = args.UID
+		kv.mu.Unlock()
+		status = kv.waitOpFinished(args.UID, args.SID)
+		kv.mu.Lock()
+	} else {
+		status = succ
+	}
+	if status == fail {
+		// return ErrWrongLeader
 	} else {
 		reply.Err = OK
 	}
@@ -198,9 +252,10 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// You may need initialization code here.
 	kv.dead = 0
 	kv.data = make(map[string]string)
-	kv.idx2op = make(map[int]Op)
-	kv.idx2term = make(map[int]int)
-	kv.idx2resend = make(map[int]bool)
+	kv.idx2sid = make(map[int]int64)
+	kv.idx2uid = make(map[int]int)
+	kv.sid2status = make(map[int]map[int64]Status)
+	kv.getVal = make(map[int]map[int64]string)
 	go kv.receiveMsg()
 
 	return kv

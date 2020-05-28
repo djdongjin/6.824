@@ -6,12 +6,16 @@ import "math/big"
 import "sync"
 import "time"
 
+var clerkID int = 0
+var clerkMu sync.Mutex 
+
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
 	curLeader int
 	mu        sync.Mutex
 	sids      map[int]bool
+	uid		  int
 }
 
 func nrand() int64 {
@@ -27,6 +31,11 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	// You'll have to add code here.
 	ck.curLeader = 0
 	ck.sids = make(map[int]bool)
+	clerkMu.Lock()
+	ck.uid = clerkID
+	clerkID++
+	clerkMu.Unlock()
+	
 	return ck
 }
 
@@ -51,7 +60,7 @@ func (ck *Clerk) Get(key string) string {
 	// You will have to modify this function.
 	ck.mu.Lock()
 	ok    := false
-	args  := GetArgs{Key:key, SID:ck.getSID()}
+	args  := GetArgs{Key:key, SID:ck.getSID(), UID:ck.uid}
 	reply := GetReply{}
 	leader := ck.curLeader
 	ck.mu.Unlock()
@@ -86,7 +95,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
 	ck.mu.Lock()
 	ok := false
-	args := PutAppendArgs{Key:key, Value:value, Op:op, SID:ck.getSID()}
+	args := PutAppendArgs{Key:key, Value:value, Op:op, SID:ck.getSID(), UID:ck.uid}
 	reply := PutAppendReply{}
 	leader := ck.curLeader
 	ck.mu.Unlock()
