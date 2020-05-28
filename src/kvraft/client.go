@@ -14,7 +14,7 @@ type Clerk struct {
 	// You will have to modify this struct.
 	curLeader int
 	mu        sync.Mutex
-	sids      map[int]bool
+	sids      map[int64]bool
 	uid		  int
 }
 
@@ -30,7 +30,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck.servers = servers
 	// You'll have to add code here.
 	ck.curLeader = 0
-	ck.sids = make(map[int]bool)
+	ck.sids = make(map[int64]bool)
 	clerkMu.Lock()
 	ck.uid = clerkID
 	clerkID++
@@ -40,7 +40,15 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 }
 
 func (ck *Clerk) getSID() int64 {
-	return nrand()
+	var sid int64
+	for {
+		sid = nrand()
+		if _, ok := ck.sids[sid]; !ok {
+			break
+		}
+	}
+	ck.sids[sid] = true
+	return sid
 }
 
 //

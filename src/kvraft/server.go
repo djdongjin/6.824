@@ -81,7 +81,7 @@ func (kv *KVServer) receiveMsg() {
 				prevSID, ok3 := kv.idx2sid[index]
 				if ok2 && prevUID != op.UID || 
 				   ok3 && prevSID != op.SID {
-					kv.sid2status[kv.idx2uid[index]][kv.idx2sid[index]] = fail
+					kv.sid2status[prevUID][prevSID] = fail
 				}
 				kv.idx2uid[index] = op.UID
 				kv.idx2sid[index] = op.SID
@@ -120,7 +120,7 @@ func (kv *KVServer) waitOpFinished(uid int, sid int64) Status {
 		}
 		kv.mu.Unlock()
 		i++
-		if i > 100 {
+		if i > 70 {
 			return fail
 		}
 		time.Sleep(10 * time.Millisecond)
