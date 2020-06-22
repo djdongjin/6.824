@@ -6,16 +6,14 @@ import "math/big"
 import "sync"
 import "time"
 
-var clerkID int = 0
-var clerkMu sync.Mutex 
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
 	curLeader int
 	mu        sync.Mutex
-	sids      map[int64]bool
-	uid		  int
+	sid       int
+	uid		  int64
 }
 
 func nrand() int64 {
@@ -30,24 +28,16 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck.servers = servers
 	// You'll have to add code here.
 	ck.curLeader = 0
-	ck.sids = make(map[int64]bool)
-	clerkMu.Lock()
-	ck.uid = clerkID
-	clerkID++
-	clerkMu.Unlock()
+	ck.sid = 0
+	ck.uid = nrand()
 	
 	return ck
 }
 
-func (ck *Clerk) getSID() int64 {
-	var sid int64
-	for {
-		sid = nrand()
-		if _, ok := ck.sids[sid]; !ok {
-			break
-		}
-	}
-	ck.sids[sid] = true
+func (ck *Clerk) getSID() int {
+	var sid int
+	sid = ck.sid
+	ck.sid++
 	return sid
 }
 

@@ -28,8 +28,8 @@ type Op struct {
 	Name  string
 	Key   string
 	Value string
-	SID   int64
-	UID	  int
+	SID   int
+	UID	  int64
 }
 
 type Status string
@@ -54,10 +54,10 @@ type KVServer struct {
 
 	// Your definitions here.
 	data	   map[string]string
-	sid2status map[int]map[int64]Status
-	idx2uid	   map[int]int
-	idx2sid	   map[int]int64
-	getVal     map[int]map[int64]string
+	sid2status map[int64]map[int]Status	// uid->sid->status
+	idx2uid	   map[int]int64			// index->uid
+	idx2sid	   map[int]int				// index->sid
+	getVal     map[int64]map[int]string // uid->sid->value
 }
 
 
@@ -71,7 +71,7 @@ func (kv *KVServer) receiveMsg() {
 			kv.mu.Lock()
 			DPrintf("%v To access (UID,SID):(%v,%v)\n", kv.me, op.UID, op.SID)
 			if _, ok := kv.sid2status[op.UID]; !ok {
-				kv.sid2status[op.UID] = make(map[int64]Status)
+				kv.sid2status[op.UID] = make(map[int]Status)
 			}
 			
 			if status, ok := kv.sid2status[op.UID][op.SID]; !ok || status != succ {
@@ -95,7 +95,7 @@ func (kv *KVServer) receiveMsg() {
 					kv.data[op.Key] = val + op.Value
 				} else {
 					if _, ok6 := kv.getVal[op.UID]; !ok6 {
-						kv.getVal[op.UID] = make(map[int64]string)
+						kv.getVal[op.UID] = make(map[int]string)
 					}
 					if _, ok6 := kv.data[op.Key]; ok6 {
 						kv.getVal[op.UID][op.SID] = kv.data[op.Key]
@@ -110,7 +110,7 @@ func (kv *KVServer) receiveMsg() {
 	}
 }
 
-func (kv *KVServer) waitOpFinished(uid int, sid int64) Status {
+func (kv *KVServer) waitOpFinished(uid int64, sid int) Status {
 	i := 0
 	for {
 		kv.mu.Lock()
@@ -140,7 +140,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	var status Status
 	kv.mu.Lock()
 	if _, ok := kv.sid2status[args.UID]; !ok {
-		kv.sid2status[args.UID] = make(map[int64]Status)
+		kv.sid2status[args.UID] = make(map[int]Status)
 	}
 	if s, ok := kv.sid2status[args.UID][args.SID]; !ok || s != succ {
 		kv.sid2status[args.UID][args.SID] = send
@@ -180,7 +180,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	var status Status
 	kv.mu.Lock()
 	if _, ok := kv.sid2status[args.UID]; !ok {
-		kv.sid2status[args.UID] = make(map[int64]Status)
+		kv.sid2status[args.UID] = make(map[int]Status)
 	}
 	if s, ok := kv.sid2status[args.UID][args.SID]; !ok || s != succ {
 		kv.sid2status[args.UID][args.SID] = send
@@ -252,10 +252,10 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// You may need initialization code here.
 	kv.dead = 0
 	kv.data = make(map[string]string)
-	kv.idx2sid = make(map[int]int64)
-	kv.idx2uid = make(map[int]int)
-	kv.sid2status = make(map[int]map[int64]Status)
-	kv.getVal = make(map[int]map[int64]string)
+	kv.idx2sid = make(map[int]int)
+	kv.idx2uid = make(map[int]int64)
+	kv.sid2status = make(map[int64]map[int]Status)
+	kv.getVal = make(map[int64]map[int]string)
 	go kv.receiveMsg()
 
 	return kv
